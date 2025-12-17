@@ -128,9 +128,29 @@ pub(crate) enum Command {
     ReadVcomValue = 0x81,
     /// This command sets `VCOM_DC` value.
     VcmDcSetting = 0x82,
-    // /// This is in all the Waveshare controllers for Epd7in5, but it's not documented
-    // /// anywhere in the datasheet `¯\_(ツ)_/¯`
-    // FlashMode = 0xE5,
+
+    /// Sets window size for the partial update
+    PartialWindow = 0x90,
+    /// Sets chip into partial update mode
+    PartialIn = 0x91,
+    /// Quits partial update mode
+    PartialOut = 0x92,
+
+    // The following commands are part of an undocumented hack by the manufacturer to select an arbitrary LUT.
+    // Normally the temperature and NEW/OLD buffer settings are used to select the correct LUT (flicker table)
+    // for healthy operation in a variety of temperatures. By abusing this command and setting a normally
+    // out-of-range value in addition to putting custom LUT's in OTP memory, one can select LUT's for other use-cases, such as:
+    //
+    // - fast refresh (LUT with fewer flickers): 0x5A
+    // - partial refresh (LUT without flicker): 0x6E
+    // - 4-grayscale (complicated hack that uses OLD/NEW buffers to encode grayscale values): 0x5F
+    //
+    // USE AT OWN RISK
+    //
+    /// This command sets cascade settings (such as allowing override temperature) for controlling primary and secondary displays
+    CascadeSetting = 0xE0,
+    /// This command is used when cascading temperature between primary and secondary displays
+    ForceTemperature = 0xE5,
 }
 
 impl traits::Command for Command {

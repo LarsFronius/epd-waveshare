@@ -1,3 +1,5 @@
+use std::error::Error;
+
 // This example tests rotations and draws analog clock, tests default fonts of embedded-graphics crate and displays an image of Ferris from examples/assets/ directory.
 use embedded_graphics::{
     image::Image,
@@ -12,47 +14,52 @@ use embedded_hal::delay::DelayNs;
 #[cfg(feature = "graphics")]
 use epd_waveshare::{color::Color, epd7in5_v2::*, graphics::DisplayRotation, prelude::*};
 use linux_embedded_hal::{
-    spidev::{self, SpidevOptions},
-    sysfs_gpio::Direction,
-    Delay, SPIError, SpidevDevice, SysfsPin,
+    gpio_cdev::{Chip, LineRequestFlags},
+    spidev::{SpiModeFlags, SpidevOptions},
+    CdevPin, Delay, SpidevDevice,
 };
 
-fn main() -> Result<(), SPIError> {
+// GPIO pin definitions (BCM numbering - no offset needed for cdev)
+const EPD_RST_PIN: u32 = 17;
+const EPD_DC_PIN: u32 = 25;
+const EPD_BUSY_PIN: u32 = 24;
+const EPD_PWR_PIN: u32 = 18;
+
+fn main() -> Result<(), Box<dyn Error>> {
     // Set up the device
-    let mut spi = SpidevDevice::open("/dev/spidev0.0").expect("spidev directory");
+    // Open the GPIO chip (usually gpiochip0 on Raspberry Pi)
+    let mut chip = Chip::new("/dev/gpiochip0")?;
+
+    // Get GPIO lines and configure them
+    let rst_line = chip.get_line(EPD_RST_PIN)?;
+    let rst_handle = rst_line.request(LineRequestFlags::OUTPUT, 0, "epd-rst")?;
+    let rst_pin = CdevPin::new(rst_handle)?;
+
+    let dc_line = chip.get_line(EPD_DC_PIN)?;
+    let dc_handle = dc_line.request(LineRequestFlags::OUTPUT, 0, "epd-dc")?;
+    let dc_pin = CdevPin::new(dc_handle)?;
+
+    let busy_line = chip.get_line(EPD_BUSY_PIN)?;
+    let busy_handle = busy_line.request(LineRequestFlags::INPUT, 0, "epd-busy")?;
+    let busy_pin = CdevPin::new(busy_handle)?;
+
+    let pwr_line = chip.get_line(EPD_PWR_PIN)?;
+    let pwr_handle = pwr_line.request(LineRequestFlags::OUTPUT, 1, "epd-pwr")?;
+    let pwr_pin = CdevPin::new(pwr_handle)?;
+
+    // Initialize SPI
+    let mut spi = SpidevDevice::open("/dev/spidev0.0")?;
     let options = SpidevOptions::new()
         .bits_per_word(8)
         .max_speed_hz(10_000_000)
-        .mode(spidev::SpiModeFlags::SPI_MODE_0)
+        .mode(SpiModeFlags::SPI_MODE_0)
         .build();
-    spi.configure(&options).expect("spi configuration");
-
-    let cs = SysfsPin::new(26);
-    cs.export().expect("cs export");
-    while !cs.is_exported() {}
-    cs.set_direction(Direction::Out).expect("CS Direction");
-    cs.set_value(1).expect("CS Value set to 1");
-
-    let busy = SysfsPin::new(24);
-    busy.export().expect("busy export");
-    while !busy.is_exported() {}
-    busy.set_direction(Direction::In).expect("busy Direction");
-
-    let dc = SysfsPin::new(25);
-    dc.export().expect("dc export");
-    while !dc.is_exported() {}
-    dc.set_direction(Direction::Out).expect("dc Direction");
-    dc.set_value(1).expect("dc Value set to 1");
-
-    let rst = SysfsPin::new(17);
-    rst.export().expect("rst export");
-    while !rst.is_exported() {}
-    rst.set_direction(Direction::Out).expect("rst Direction");
-    rst.set_value(1).expect("rst Value set to 1");
+    spi.configure(&options)?;
 
     let mut delay = Delay {};
 
-    let mut epd7in5 = Epd7in5::new(&mut spi, busy, dc, rst, &mut delay, None).expect("epd new");
+    let mut epd7in5 =
+        Epd7in5::new(&mut spi, busy_pin, dc_pin, rst_pin, &mut delay, None).expect("epd new");
     let mut display = Display7in5::default();
     println!("Device successfully initialized!");
 
@@ -156,7 +163,8 @@ fn main() -> Result<(), SPIError> {
     display.clear(Color::Black).ok();
     epd7in5.update_and_display_frame(&mut spi, display.buffer(), &mut delay)?;
     println!("Finished tests - going to sleep");
-    epd7in5.sleep(&mut spi, &mut delay)
+    epd7in5.sleep(&mut spi, &mut delay)?;
+    Ok(())
 }
 
 fn draw_text(display: &mut Display7in5, text: &str, x: i32, y: i32) {

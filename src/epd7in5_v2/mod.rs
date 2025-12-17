@@ -44,12 +44,13 @@ const IS_BUSY_LOW: bool = true;
 const SINGLE_BYTE_WRITE: bool = false;
 
 /// Epd7in5 (V2) driver
-///
 pub struct Epd7in5<SPI, BUSY, DC, RST, DELAY> {
     /// Connection Interface
     interface: DisplayInterface<SPI, BUSY, DC, RST, DELAY, SINGLE_BYTE_WRITE>,
     /// Background Color
     color: Color,
+    /// Refresh LUT
+    refresh: RefreshLut,
 }
 
 impl<SPI, BUSY, DC, RST, DELAY> InternalWiAdditions<SPI, BUSY, DC, RST, DELAY>
@@ -70,16 +71,12 @@ where
         // and as per specs:
         // https://www.waveshare.com/w/upload/6/60/7.5inch_e-Paper_V2_Specification.pdf
 
-        self.cmd_with_data(spi, Command::PowerSetting, &[0x07, 0x07, 0x3f, 0x3f])?;
-        self.cmd_with_data(spi, Command::BoosterSoftStart, &[0x17, 0x17, 0x28, 0x17])?;
+        // Edited to only retain settings that deviate from defaults in OTP
+
         self.command(spi, Command::PowerOn)?;
         delay.delay_ms(100);
         self.wait_until_idle(spi, delay)?;
-        self.cmd_with_data(spi, Command::PanelSetting, &[0x1F])?;
-        self.cmd_with_data(spi, Command::TconResolution, &[0x03, 0x20, 0x01, 0xE0])?;
-        self.cmd_with_data(spi, Command::DualSpi, &[0x00])?;
-        self.cmd_with_data(spi, Command::VcomAndDataIntervalSetting, &[0x10, 0x07])?;
-        self.cmd_with_data(spi, Command::TconSetting, &[0x22])?;
+        self.cmd_with_data(spi, Command::PanelSetting, &[0x1F])?; // Sets black and white as opposed to black, white and red.
         Ok(())
     }
 }
@@ -105,7 +102,11 @@ where
         let interface = DisplayInterface::new(busy, dc, rst, delay_us);
         let color = DEFAULT_BACKGROUND_COLOR;
 
-        let mut epd = Epd7in5 { interface, color };
+        let mut epd = Epd7in5 {
+            interface,
+            color,
+            refresh: RefreshLut::default(),
+        };
 
         epd.init(spi, delay)?;
 
@@ -137,15 +138,47 @@ where
 
     fn update_partial_frame(
         &mut self,
-        _spi: &mut SPI,
-        _delay: &mut DELAY,
-        _buffer: &[u8],
-        _x: u32,
-        _y: u32,
-        _width: u32,
-        _height: u32,
+        spi: &mut SPI,
+        delay: &mut DELAY,
+        buffer: &[u8],
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
     ) -> Result<(), SPI::Error> {
-        unimplemented!();
+        self.wait_until_idle(spi, delay)?;
+        if buffer.len() as u32 != width / 8 * height {
+            //TODO panic or error
+        }
+
+        let hrst_upper = (x / 8) as u8 >> 5;
+        let hrst_lower = ((x / 8) << 3) as u8;
+        let hred_upper = ((x + width) / 8 - 1) as u8 >> 5;
+        let hred_lower = (((x + width) / 8 - 1) << 3) as u8 | 0b111;
+        let vrst_upper = (y >> 8) as u8;
+        let vrst_lower = y as u8;
+        let vred_upper = ((y + height - 1) >> 8) as u8;
+        let vred_lower = (y + height - 1) as u8;
+        let pt_scan = 0x01; // Gates scan both inside and outside of the partial window. (default)
+
+        self.command(spi, Command::PartialIn)?;
+        self.cmd_with_data(
+            spi,
+            Command::PartialWindow,
+            &[
+                hrst_upper, hrst_lower, hred_upper, hred_lower, vrst_upper, vrst_lower, vred_upper,
+                vred_lower, pt_scan,
+            ],
+        )?;
+        let half = buffer.len() / 2;
+        self.cmd_with_data(spi, Command::DataStartTransmission1, &buffer[..half])?;
+        self.cmd_with_data(spi, Command::DataStartTransmission2, &buffer[half..])?;
+
+        self.command(spi, Command::DisplayRefresh)?;
+        self.wait_until_idle(spi, delay)?;
+
+        self.command(spi, Command::PartialOut)?;
+        Ok(())
     }
 
     fn display_frame(&mut self, spi: &mut SPI, delay: &mut DELAY) -> Result<(), SPI::Error> {
@@ -197,11 +230,38 @@ where
 
     fn set_lut(
         &mut self,
-        _spi: &mut SPI,
+        spi: &mut SPI,
         _delay: &mut DELAY,
-        _refresh_rate: Option<RefreshLut>,
+        refresh_rate: Option<RefreshLut>,
     ) -> Result<(), SPI::Error> {
-        unimplemented!();
+        if let Some(refresh) = refresh_rate {
+            self.refresh = refresh;
+        }
+
+        // NOT DOCUMENTED IN OFFICIAL SPEC: Override temperature-based LUT selection for fast refresh mode
+        // The cascade temperature setting (0xE5) accepts out-of-range values (beyond the 49°C max)
+        // which the manufacturer uses as custom LUT indices in OTP memory. Used in official demo's and libraries, but not documented behavior.
+        match self.refresh {
+            RefreshLut::Full => {
+                // This disables custom LUT indices and uses normal temperature-based operation
+                self.cmd_with_data(spi, Command::CascadeSetting, &[0x00])?
+            }
+            RefreshLut::Quick => {
+                // This selects a speed-optimized waveform: fewer voltage transitions mean faster updates
+                // (~2s vs ~4s) at the cost of increased ghosting.
+                self.cmd_with_data(spi, Command::CascadeSetting, &[0x20])?;
+                self.cmd_with_data(spi, Command::ForceTemperature, &[0x5A])?;
+            }
+            RefreshLut::PartialRefresh => {
+                // This waveform applies gentle voltage transitions that update only the changed
+                // pixels without the full-screen flicker normally required to clear ghosting.
+                // Will accumulate hosting over many cycles - requires occasional full refresh to
+                // maintain image quality.
+                self.cmd_with_data(spi, Command::CascadeSetting, &[0x20])?;
+                self.cmd_with_data(spi, Command::ForceTemperature, &[0x6E])?;
+            }
+        }
+        Ok(())
     }
 
     fn wait_until_idle(&mut self, spi: &mut SPI, delay: &mut DELAY) -> Result<(), SPI::Error> {
