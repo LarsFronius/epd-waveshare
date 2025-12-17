@@ -44,8 +44,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let busy_pin = CdevPin::new(busy_handle)?;
 
     let pwr_line = chip.get_line(EPD_PWR_PIN)?;
-    let pwr_handle = pwr_line.request(LineRequestFlags::OUTPUT, 1, "epd-pwr")?;
-    let pwr_pin = CdevPin::new(pwr_handle)?;
+    let _ = pwr_line.request(LineRequestFlags::OUTPUT, 1, "epd-pwr")?;
 
     // Initialize SPI
     let mut spi = SpidevDevice::open("/dev/spidev0.0")?;
@@ -60,6 +59,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut epd7in5 =
         Epd7in5::new(&mut spi, busy_pin, dc_pin, rst_pin, &mut delay, None).expect("epd new");
+    epd7in5.set_lut(&mut spi, &mut delay, Some(RefreshLut::Quick))?;
     let mut display = Display7in5::default();
     println!("Device successfully initialized!");
 
