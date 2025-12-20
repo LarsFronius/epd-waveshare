@@ -69,27 +69,6 @@ pub(crate) enum Command {
     /// Dual SPI - what for?
     DualSpi = 0x15,
 
-    /// This command builds the VCOM Look-Up Table (LUTC).
-    LutForVcom = 0x20,
-    /// This command builds the Black Look-Up Table (LUTB).
-    LutBlack = 0x21,
-    /// This command builds the White Look-Up Table (LUTW).
-    LutWhite = 0x22,
-    /// This command builds the Gray1 Look-Up Table (LUTG1).
-    LutGray1 = 0x23,
-    /// This command builds the Gray2 Look-Up Table (LUTG2).
-    LutGray2 = 0x24,
-    /// This command builds the Red0 Look-Up Table (LUTR0).
-    LutRed0 = 0x25,
-    /// This command builds the Red1 Look-Up Table (LUTR1).
-    LutRed1 = 0x26,
-    /// This command builds the Red2 Look-Up Table (LUTR2).
-    LutRed2 = 0x27,
-    /// This command builds the Red3 Look-Up Table (LUTR3).
-    LutRed3 = 0x28,
-    /// This command builds the XON Look-Up Table (LUTXON).
-    LutXon = 0x29,
-
     /// The command controls the PLL clock frequency.
     PllControl = 0x30,
 

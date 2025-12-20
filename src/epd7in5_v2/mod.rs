@@ -39,7 +39,7 @@ pub const WIDTH: u32 = 800;
 /// Height of the display
 pub const HEIGHT: u32 = 480;
 /// Default Background Color
-pub const DEFAULT_BACKGROUND_COLOR: Color = Color::White;
+pub const DEFAULT_BACKGROUND_COLOR: Color = Color::Black;
 const IS_BUSY_LOW: bool = true;
 const SINGLE_BYTE_WRITE: bool = false;
 
@@ -49,6 +49,8 @@ pub struct Epd7in5<SPI, BUSY, DC, RST, DELAY> {
     interface: DisplayInterface<SPI, BUSY, DC, RST, DELAY, SINGLE_BYTE_WRITE>,
     /// Background Color
     color: Color,
+    /// LUT refresh mode
+    refresh: RefreshLut,
 }
 
 impl<SPI, BUSY, DC, RST, DELAY> InternalWiAdditions<SPI, BUSY, DC, RST, DELAY>
@@ -69,15 +71,14 @@ where
         // and as per specs:
         // https://www.waveshare.com/w/upload/6/60/7.5inch_e-Paper_V2_Specification.pdf
 
-        // Edited to only retain settings that deviate from defaults in OTP
+        // Only edits settings that deviate from defaults in OTP
 
-        self.command(spi, Command::PowerOn)?;
+        self.cmd_with_data(spi, Command::BoosterSoftStart, &[0x17, 0x17, 0x28, 0x17])?;
+        self.cmd(spi, Command::PowerOn)?;
         delay.delay_ms(100);
         self.wait_until_idle(spi, delay)?;
         self.cmd_with_data(spi, Command::PanelSetting, &[0x1F])?; // Sets black and white as opposed to black, white and red.
-
-        // Booster power settings
-        self.cmd_with_data(spi, Command::BoosterSoftStart, &[0x17, 0x17, 0x28, 0x17])?;
+        self.cmd_with_data(spi, Command::VcomAndDataIntervalSetting, &[0x29, 0x07])?; // Sets NEW/OLD buffer behavior and polarity
         Ok(())
     }
 }
@@ -103,7 +104,11 @@ where
         let interface = DisplayInterface::new(busy, dc, rst, delay_us);
         let color = DEFAULT_BACKGROUND_COLOR;
 
-        let mut epd = Epd7in5 { interface, color };
+        let mut epd = Epd7in5 {
+            interface,
+            color,
+            refresh: RefreshLut::default(),
+        };
 
         epd.init(spi, delay)?;
 
@@ -115,8 +120,7 @@ where
     }
 
     fn sleep(&mut self, spi: &mut SPI, delay: &mut DELAY) -> Result<(), SPI::Error> {
-        self.wait_until_idle(spi, delay)?;
-        self.command(spi, Command::PowerOff)?;
+        self.cmd(spi, Command::PowerOff)?;
         self.wait_until_idle(spi, delay)?;
         self.cmd_with_data(spi, Command::DeepSleep, &[0xA5])?;
         Ok(())
@@ -126,9 +130,8 @@ where
         &mut self,
         spi: &mut SPI,
         buffer: &[u8],
-        delay: &mut DELAY,
+        _delay: &mut DELAY,
     ) -> Result<(), SPI::Error> {
-        self.wait_until_idle(spi, delay)?;
         self.cmd_with_data(spi, Command::DataStartTransmission2, buffer)?;
         Ok(())
     }
@@ -143,22 +146,30 @@ where
         width: u32,
         height: u32,
     ) -> Result<(), SPI::Error> {
-        self.wait_until_idle(spi, delay)?;
-        if buffer.len() as u32 != width / 8 * height {
-            //TODO panic or error
+        let expected_size = buffer_len(width as usize, height as usize);
+        let actual_size = buffer.len();
+        if actual_size != expected_size {
+            panic!("Buffer is incorrect size. Expected: {expected_size}. Actual: {actual_size}.")
         }
 
-        let hrst_upper = (x / 8) as u8 >> 5;
-        let hrst_lower = ((x / 8) << 3) as u8;
-        let hred_upper = ((x + width) / 8 - 1) as u8 >> 5;
-        let hred_lower = (((x + width) / 8 - 1) << 3) as u8 | 0b111;
-        let vrst_upper = (y >> 8) as u8;
-        let vrst_lower = y as u8;
-        let vred_upper = ((y + height - 1) >> 8) as u8;
-        let vred_lower = (y + height - 1) as u8;
+        let x_end = x + width;
+        let y_end = y + height;
+
+        // Horizontal coordinates - treat as raw pixel values, not byte banks
+        let hrst_upper = (x / 256) as u8;
+        let hrst_lower = (x % 256) as u8;
+        let hred_upper = (x_end / 256) as u8;
+        let hred_lower = (x_end % 256 - 1) as u8; // Note: subtraction happens after modulo
+
+        // Vertical coordinates - standard 10-bit split
+        let vrst_upper = (y / 256) as u8;
+        let vrst_lower = (y % 256) as u8;
+        let vred_upper = (y_end / 256) as u8;
+        let vred_lower = (y_end % 256 - 1) as u8;
+
         let pt_scan = 0x01; // Gates scan both inside and outside of the partial window. (default)
 
-        self.command(spi, Command::PartialIn)?;
+        self.cmd(spi, Command::PartialIn)?;
         self.cmd_with_data(
             spi,
             Command::PartialWindow,
@@ -167,20 +178,19 @@ where
                 vred_lower, pt_scan,
             ],
         )?;
-        let half = buffer.len() / 2;
-        self.cmd_with_data(spi, Command::DataStartTransmission1, &buffer[..half])?;
-        self.cmd_with_data(spi, Command::DataStartTransmission2, &buffer[half..])?;
 
-        self.command(spi, Command::DisplayRefresh)?;
+        self.update_frame(spi, buffer, delay)?;
+
+        self.cmd(spi, Command::DisplayRefresh)?;
         self.wait_until_idle(spi, delay)?;
 
-        self.command(spi, Command::PartialOut)?;
+        self.cmd(spi, Command::PartialOut)?;
         Ok(())
     }
 
     fn display_frame(&mut self, spi: &mut SPI, delay: &mut DELAY) -> Result<(), SPI::Error> {
+        self.cmd(spi, Command::DisplayRefresh)?;
         self.wait_until_idle(spi, delay)?;
-        self.command(spi, Command::DisplayRefresh)?;
         Ok(())
     }
 
@@ -191,21 +201,17 @@ where
         delay: &mut DELAY,
     ) -> Result<(), SPI::Error> {
         self.update_frame(spi, buffer, delay)?;
-        self.command(spi, Command::DisplayRefresh)?;
+        self.cmd(spi, Command::DisplayRefresh)?;
+        self.wait_until_idle(spi, delay)?;
         Ok(())
     }
 
     fn clear_frame(&mut self, spi: &mut SPI, delay: &mut DELAY) -> Result<(), SPI::Error> {
+        self.cmd(spi, Command::DataStartTransmission2)?;
+        self.interface.data_x_times(spi, 0xFF, WIDTH / 8 * HEIGHT)?;
+
+        self.cmd(spi, Command::DisplayRefresh)?;
         self.wait_until_idle(spi, delay)?;
-        self.send_resolution(spi)?;
-
-        self.command(spi, Command::DataStartTransmission1)?;
-        self.interface.data_x_times(spi, 0x00, WIDTH / 8 * HEIGHT)?;
-
-        self.command(spi, Command::DataStartTransmission2)?;
-        self.interface.data_x_times(spi, 0x00, WIDTH / 8 * HEIGHT)?;
-
-        self.command(spi, Command::DisplayRefresh)?;
         Ok(())
     }
 
@@ -231,18 +237,26 @@ where
         _delay: &mut DELAY,
         refresh_rate: Option<RefreshLut>,
     ) -> Result<(), SPI::Error> {
+        if Some(self.refresh) == refresh_rate {
+            return Ok(());
+        }
+
+        if self.refresh == RefreshLut::Quick {
+            // Return booster power settings to default
+            self.cmd_with_data(spi, Command::BoosterSoftStart, &[0x17, 0x17, 0x28, 0x17])?;
+        }
+
         // NOT DOCUMENTED IN OFFICIAL SPEC: Override temperature-based LUT selection for fast refresh mode
         // The cascade temperature setting (0xE5) accepts out-of-range values (beyond the 49°C max)
-        // which the manufacturer uses as custom LUT indices in OTP memory. Used in official demo's and libraries, but not documented behavior.
+        // which the manufacturer uses as custom LUT indices in OTP memory.
+        // This is used in official demo's and libraries, but is not documented behavior.
         match refresh_rate {
             Some(RefreshLut::Full) | None => {
-                // Booster power settings
-                self.cmd_with_data(spi, Command::BoosterSoftStart, &[0x17, 0x17, 0x28, 0x17])?;
                 // This disables custom LUT indices and uses normal temperature-based operation
-                self.cmd_with_data(spi, Command::CascadeSetting, &[0x00])?
+                self.cmd_with_data(spi, Command::CascadeSetting, &[0x00])?;
             }
             Some(RefreshLut::Quick) => {
-                // Booster power settings
+                // Booster power settings for quick LUT
                 self.cmd_with_data(spi, Command::BoosterSoftStart, &[0x27, 0x27, 0x18, 0x17])?;
                 // This selects a speed-optimized waveform: fewer voltage transitions mean faster updates
                 // (~2s vs ~4s) at the cost of increased ghosting.
@@ -250,8 +264,6 @@ where
                 self.cmd_with_data(spi, Command::ForceTemperature, &[0x5A])?;
             }
             Some(RefreshLut::PartialRefresh) => {
-                // Booster power settings
-                self.cmd_with_data(spi, Command::BoosterSoftStart, &[0x17, 0x17, 0x28, 0x17])?;
                 // This waveform applies gentle voltage transitions that update only the changed
                 // pixels without the full-screen flicker normally required to clear ghosting.
                 // Will accumulate hosting over many cycles - requires occasional full refresh to
@@ -260,6 +272,9 @@ where
                 self.cmd_with_data(spi, Command::ForceTemperature, &[0x6E])?;
             }
         }
+
+        self.refresh = refresh_rate.unwrap_or_default();
+
         Ok(())
     }
 
@@ -277,12 +292,8 @@ where
     RST: OutputPin,
     DELAY: DelayNs,
 {
-    fn command(&mut self, spi: &mut SPI, command: Command) -> Result<(), SPI::Error> {
+    fn cmd(&mut self, spi: &mut SPI, command: Command) -> Result<(), SPI::Error> {
         self.interface.cmd(spi, command)
-    }
-
-    fn send_data(&mut self, spi: &mut SPI, data: &[u8]) -> Result<(), SPI::Error> {
-        self.interface.data(spi, data)
     }
 
     fn cmd_with_data(
@@ -292,17 +303,6 @@ where
         data: &[u8],
     ) -> Result<(), SPI::Error> {
         self.interface.cmd_with_data(spi, command, data)
-    }
-
-    fn send_resolution(&mut self, spi: &mut SPI) -> Result<(), SPI::Error> {
-        let w = self.width();
-        let h = self.height();
-
-        self.command(spi, Command::TconResolution)?;
-        self.send_data(spi, &[(w >> 8) as u8])?;
-        self.send_data(spi, &[w as u8])?;
-        self.send_data(spi, &[(h >> 8) as u8])?;
-        self.send_data(spi, &[h as u8])
     }
 }
 
@@ -314,6 +314,6 @@ mod tests {
     fn epd_size() {
         assert_eq!(WIDTH, 800);
         assert_eq!(HEIGHT, 480);
-        assert_eq!(DEFAULT_BACKGROUND_COLOR, Color::White);
+        assert_eq!(DEFAULT_BACKGROUND_COLOR, Color::Black);
     }
 }
