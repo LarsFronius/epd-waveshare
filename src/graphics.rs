@@ -4,6 +4,9 @@ use crate::color::{Color, ColorType, TriColor};
 use core::marker::PhantomData;
 use embedded_graphics_core::prelude::*;
 
+extern crate alloc;
+use alloc::vec::Vec;
+
 /// Display rotation, only 90° increments supported
 #[derive(Clone, Copy, Default)]
 pub enum DisplayRotation {
@@ -449,7 +452,7 @@ impl<'a, COLOR: ColorType + PixelColor> PartialFrame<'a, COLOR> {
             aligned_width,
             height,
             bwrbit,
-            buffer: vec![0u8; buffer_size],
+            buffer: alloc::vec![0u8; buffer_size],
             full_display_buffer,
             full_display_width,
             full_display_size,
